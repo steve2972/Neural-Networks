@@ -102,3 +102,10 @@ def _inverted_res_block(inputs, in_channels, expansion, stride, alpha, filters, 
         return layers.Add()([inputs, x])
     return x
 
+model = MobileNetV2(classes=100)
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+keras.utils.plot_model(model, to_file='mobilenet.png')
