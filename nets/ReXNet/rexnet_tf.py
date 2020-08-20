@@ -1,153 +1,102 @@
 import tensorflow as tf
-from tensorflow import nn
 from tensorflow import keras
 from tensorflow.keras import layers
-from math import ceil
 
-class Swish(keras.Model):
-    def __init__(self):
-        super(Swish, self).__init__()
-    
-    def call(self, x):
-        return keras.activations.swish(x)
+def ReXNet(input_shape=None, alpha=1.0, classes=1000):
+    if input_shape == None:
+        # Channels last
+        input_shape=(224, 224, 3)
 
-def _add_conv(out, in_channels, channels, kernel=1, stride=1, pad=0,
-                num_group=1, active=True, relu6=False):
+    img_input = layers.Input(shape=input_shape)
+
+    x = ConvBNSwish(img_input, out_channels=32, kernel=3, stride=2, pad='same', name='first_conv')
+    x = LinearBottleneck(x, use_se = False, in_channels=32, out_channels=16, t=1, stride=1, name='1')
+
+    x = LinearBottleneck(x, use_se = False, in_channels=16, out_channels=27, t=6, stride=2, name='2')
+    x = LinearBottleneck(x, use_se = False, in_channels=27, out_channels=38, t=6, stride=1, name='3')
+
+    x = LinearBottleneck(x, use_se = True, in_channels=38, out_channels=50, t=6, stride=2, name='4')
+    x = LinearBottleneck(x, use_se = True, in_channels=50, out_channels=61, t=6, stride=1, name='5')
+    x = LinearBottleneck(x, use_se = True, in_channels=61, out_channels=72, t=6, stride=2, name='6')
+    x = LinearBottleneck(x, use_se = True, in_channels=72, out_channels=84, t=6, stride=1, name='7')
+    x = LinearBottleneck(x, use_se = True, in_channels=84, out_channels=95, t=6, stride=1, name='8')
+    x = LinearBottleneck(x, use_se = True, in_channels=95, out_channels=106, t=6, stride=1, name='9')
+    x = LinearBottleneck(x, use_se = True, in_channels=106, out_channels=117, t=6, stride=1, name='10')
+    x = LinearBottleneck(x, use_se = True, in_channels=117, out_channels=128, t=6, stride=1, name='11')
+    x = LinearBottleneck(x, use_se = True, in_channels=128, out_channels=140, t=6, stride=2, name='12')
+    x = LinearBottleneck(x, use_se = True, in_channels=140, out_channels=151, t=6, stride=1, name='13')
+    x = LinearBottleneck(x, use_se = True, in_channels=151, out_channels=162, t=6, stride=1, name='14')
+    x = LinearBottleneck(x, use_se = True, in_channels=162, out_channels=174, t=6, stride=1, name='15')
+    x = LinearBottleneck(x, use_se = True, in_channels=174, out_channels=185, t=6, stride=1, name='16')
+
+    pen_channels = int(1280 * alpha)
+
+    x = ConvBNSwish(x, pen_channels)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dropout(0.2)(x)
+    x = layers.Dense(classes, name='predict', use_bias=True)(x)
+    outputs = layers.Flatten()(x)
+
+    model = keras.models.Model(img_input, outputs, name="ReXNet")
+    return model
     
-    out.append(layers.Conv2D(channels, kernel_size=kernel, strides=stride, use_bias=False, groups=num_group))
-    out.append(layers.BatchNormalization())
+
+#### BUILDER FUNCTIONS #####
+
+
+def ConvBNSwish(_in, out_channels, kernel=1, stride=1, pad='valid', num_group=1, name=''):
+    x = layers.Conv2D(out_channels, kernel, strides=stride, 
+                        padding=pad, groups=num_group, use_bias=False, name=name)(_in)
+    x = layers.BatchNormalization(name=name+'BN')(x)
+    x = tf.nn.swish(x)
+    return x
+
+def ConvBNAct(_in, out_channels, kernel=1, stride=1, pad='valid', num_group=1, active=True, relu6=False):
+    x = layers.Conv2D(out_channels, kernel, strides=stride, padding=pad, use_bias=False)(_in)
+    x = layers.BatchNormalization()(x)
     if active:
-        out.append(layers.ReLU(max_value=6) if relu6 else layers.ReLU())
+        return layers.ReLU(6.)(x) if relu6 else layers.ReLU()(x)
+    else:
+        return x
 
-def _add_conv_swish(out, in_channels, channels, kernel=1, stride=1, pad=0, num_group=1):
-    out.append(layers.Conv2D(channels, kernel_size=kernel, strides=stride, use_bias=False))
-    out.append(layers.BatchNormalization())
-    out.append(Swish())
+def DepthBNAct(_in, kernel=3, stride=1):
+    x = layers.DepthwiseConv2D(kernel, strides=stride, use_bias=False, padding='same')(_in)
+    x = layers.BatchNormalization()(x)
+    return x
 
-class SE(keras.Model):
-    def __init__(self, in_channels, channels, se_ratio=12):
-        super(SE, self).__init__()
-        self.avg_pool = layers.AveragePooling2D()
-        self.fc = keras.Sequential(
-            [
-                layers.Conv2D(channels // se_ratio, kernel_size=1),
-                layers.BatchNormalization(),
-                layers.ReLU(),
-                layers.Conv2D(channels, kernel_size=1, activation='sigmoid')
-            ]
-        )
-    def call(self, x):
-        y = self.avg_pool(x)
-        y = self.fc(y)
-        return x * y
-
-class LinearBottleneck(keras.Model):
-    def __init__(self, in_channels, channels, t, stride, 
-                use_se=True, se_ratio=12, **kwargs):
-        super(LinearBottleneck, self).__init__(**kwargs)
-
-        # Use shortcut if stride = 1 and output is bigger than the input
-        self.use_shortcut = stride == 1 and in_channels <= channels
-        self.in_channels = in_channels
-        self.out_channels = channels
-
-        out = []
-        if t != 1:
-            # Expansion factor is greater than 1
-            dw_channels = in_channels * t
-            _add_conv_swish(out, in_channels=in_channels, channels=dw_channels)
-        else:
-            dw_channels = in_channels
-        
-        _add_conv(out, in_channels=dw_channels, channels=dw_channels, kernel=3, stride=stride, pad=1,
-                  num_group=dw_channels,
-                  active=False)
-        
-        if use_se:
-            out.append(SE(dw_channels, dw_channels, se_ratio))
-        
-        out.append(layers.ReLU(max_value=6))
-        _add_conv(out, in_channels=dw_channels, channels=channels, active=False, relu6=True)
-        self.out = keras.Sequential(out)
+def Squeeze(_in, out_channels, se_ratio=12):
+    # First pool
+    avg_pool = layers.AvgPool2D(1)(_in)
     
-    def call(self, x):
-        out = self.out(x)
-        if self.use_shortcut:
-            out[:, 0:self.in_channels] += x
-        
-        return out
+    # Next, fully connected sequential layers
+    x = layers.Conv2D(out_channels // se_ratio, kernel_size=1, padding='valid')(avg_pool)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+    x = layers.Conv2D(out_channels, kernel_size=1, padding='valid', activation='sigmoid')(x)
 
-class ReXNetV1(keras.Model):
-    def __init__(self, input_shape=(32,32,3),input_ch=16, final_ch=180, width_mult=1.0, depth_mult=1.0, classes=1000,
-                 use_se=True,
-                 se_ratio=12,
-                 dropout_ratio=0.2,
-                 bn_momentum=0.9):
-        super(ReXNetV1, self).__init__()
+    return layers.multiply([_in, x])
 
-        _layers = [1,2,2,3,3,5]
-        strides = [1,2,2,2,1,2]
+def LinearBottleneck(_in, in_channels, out_channels, t, 
+                        stride, use_se=True, se_ratio=12, name=''):
+    use_shortcut = stride == 1 and in_channels <= out_channels
+    x = _in
 
-        # Multiply the layer size by the depth multiplier
-        _layers = [ceil(element * depth_mult) for element in _layers]
-        strides = sum([[element] + [1] * (_layers[idx] - 1) for idx, element in enumerate(strides)], [])
-        # Expansion size is 1 for only the first layer, 6 for everything else
-        ts = [1] * _layers[0] + [6] * sum(_layers[1:])
-        self.depth = sum(_layers[:]) * 3
+    if t != 1:
+        dw_channels = in_channels * t
+        x = ConvBNSwish(x, dw_channels, name='Bottleneck'+name)
+    else:
+        dw_channels = in_channels
 
-        stem_channel = 32 / width_mult if width_mult < 1.0 else 32
-        inplanes = input_ch / width_mult if width_mult <1.0 else input_ch
+    x = DepthBNAct(x, kernel=3, stride=stride)
 
-        features = []
-        in_channels_group = []
-        channels_group = []
-
-        features.append(layers.Conv2D(int(round(stem_channel * width_mult)), kernel_size=3, strides=2, use_bias=False, input_shape=input_shape))
-        features.append(layers.BatchNormalization())
-        features.append(Swish())
-
-        for i in range(self.depth // 3):
-            if i == 0:
-                in_channels_group.append(int(round(stem_channel * width_mult)))
-                channels_group.append(int(round(inplanes * width_mult)))
-            else:
-                in_channels_group.append(int(round(inplanes * width_mult)))
-                inplanes += final_ch / (self.depth // 3 * 1.0)
-                channels_group.append(int(round(inplanes * width_mult)))
-            
-        if use_se:
-            use_ses = [False] * (_layers[0] + _layers[1]) + [True] * sum(_layers[2:])
-        else:
-            use_ses = [False] * sum(_layers[:])
-
-        for block_idx, (in_c, c, t, s, se) in enumerate(zip(in_channels_group, channels_group, ts, strides, use_ses)):
-            features.append(LinearBottleneck(in_channels=in_c,
-                                             channels=c,
-                                             t=t,
-                                             stride=s,
-                                             use_se=se, se_ratio=se_ratio))
-
-        pen_channels = int(1280 * width_mult)
-        _add_conv_swish(features, c, pen_channels)
-
-        features.append(layers.AveragePooling2D())
-        self.features = keras.Sequential(features)
-        self.output = keras.Sequential(
-            layers.Dropout(dropout_ratio),
-            layers.Conv2D(classes, 1, use_bias=True)
-        )
+    if use_se:
+        x = Squeeze(x, dw_channels, se_ratio)
     
-    def call(self, x):
-        x = self.features(x)
-        x = self.output(x)
-        return tf.squeeze(x)
+    x = layers.ReLU(6.)(x)
+    x = ConvBNAct(x, out_channels, active=False, relu6=True)
 
-model = ReXNetV1(classes=10)
-
-model.compile(
-    optimizer=keras.optimizers.RMSprop(),  # Optimizer
-    # Loss function to minimize
-    loss=keras.losses.SparseCategoricalCrossentropy(),
-    # List of metrics to monitor
-    metrics=[keras.metrics.SparseCategoricalAccuracy()],
-)
+    if use_shortcut:
+        res = layers.Conv2D(out_channels, 1, name='bottleneck_shortcut'+name)(_in)
+        res = layers.BatchNormalization(name='shortcut_bn'+name)(res)
+        return layers.Add(name='residual' + name)([x, res])
+    return x
