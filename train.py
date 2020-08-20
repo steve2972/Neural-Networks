@@ -10,12 +10,12 @@ from create_data import download_data
 
 ds_train, ds_test = download_data(dataset_name='cifar100', batch_size=128)
 
-
+optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
 model = MobileNetV2(classes=100)
 model.compile(
-    optimizer=keras.optimizers.RMSprop(),  # Optimizer
+    optimizer=optimizer,  # Optimizer
     loss=keras.losses.CategoricalCrossentropy(),
-    metrics=[keras.metrics.SparseCategoricalAccuracy()],
+    metrics=[keras.metrics.CategoricalAccuracy()],
 )
 
 #keras.utils.plot_model(model, "rexnet.png")
